@@ -1,189 +1,82 @@
+import re
 from os import path
-from tkinter import Tk, Canvas, Frame, Label, \
-    ALL, Button, Entry, END, Scrollbar, N, S, E, W, LEFT, PhotoImage
-from tkinter.constants import DISABLED, NORMAL, RIGHT
-from threading import Thread, Event
-from time import sleep
+from collections import Counter
+from warnings import warn
 
 
-class ChatGUI:
-    def __init__(self, callback, first_message="welcome to ChatBotAI", terminate="quit"):
+class SpellChecker:
+
+    def __init__(self, local_path, language='en'):
+        try:
+            self.WORDS = Counter(self.words(open(path.join(
+                local_path, language, "words.txt"), encoding='utf-8').read()))
+        except FileNotFoundError:
+            warn("words.txt for language `{}` not found in `{}`".format(language, local_path),
+                 ResourceWarning)
+            self.WORDS = Counter()
+        self.total_word_count = sum(self.WORDS.values())
+        if self.total_word_count == 0:
+            self.total_word_count = 1
+
+    @staticmethod
+    def words(text):
+        return re.findall(r'\w+', text.lower())
+
+    def correction(self, text, min_word_length=4):
         """
-        callback: (function) Bot callback function
-        first_message: (Str) first string message show to user
-        terminate: (str) string message shown user
-
-        Initialize the tkinter window and start the mainloop.
-
-        Canvas is used to create the window. Each message is created as
+        Spell correction based on Most probable spelling correction for word.
+        :param text: str
+        :param min_word_length: word length
+        :return: str
         """
-        # media path for bot images
-        self.data_path = path.join(path.dirname(path.dirname(path.abspath(__file__))), "media")
+        return " ".join(i if len(i) < min_word_length or self.WORDS[i]
+                        else max(self.candidates(i), key=self.probability)
+                        for i in text.split())
 
-        # instance args
-        self.callback = callback
-        self.terminate = terminate
-
-        # initialize tkinter start
-        self.root = Tk()
-        self.root.title("Sample ChatBot")
-        self.root.protocol("WM_DELETE_WINDOW", self.close_handler)
-        # this removes the maximize
-        self.root.resizable(0, 0)
-
-        self.canvas = Canvas(self.root, width=800, height=500, bg="white")
-        self.canvas.grid(row=0, column=0)
-        self.canvas_scroll_y = Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
-        self.canvas_scroll_y.grid(row=0, column=1, sticky=(N, S, W, E))
-        self.canvas.configure(yscrollcommand=self.canvas_scroll_y.set)
-
-        self.user_input_box = Entry(self.root)
-        self.user_input_box.grid(row=1, column=0, padx=5, pady=10, ipady=8, ipadx=290, sticky=W)
-        self.user_input_box.bind("<Return>", self.user_input_handler)
-        self.user_input_box.bind("<Shift_L><Return>", self.user_input_box_handler)
-        send_image = PhotoImage(file=path.join(self.data_path, "send.png"))
-        self.send_button = Button(self.root, image=send_image,
-                                  command=lambda: self.user_input_handler(None))
-        self.send_button.grid(row=1, column=0, sticky=E)
-
-        self.bot_image = PhotoImage(file=path.join(self.data_path, "robot.png"))
-        self.user_image = PhotoImage(file=path.join(self.data_path, "user.png"))
-        # initialize tkinter stop
-
-        # get the last bubble objects to move them up for next bubbles
-        self.last_bubble = None
-
-        # bubble thread objects
-        self.user_thread = None
-        self.bot_thread = None
-        self.thread_event = Event()
-
-        if first_message:
-            self.add_bot_message(first_message)
-
-        self.root.mainloop()
-
-    def close_handler(self):
+    def probability(self, word):
         """
-        When the close button of MainWindow pressed we need to kill the active threads
-        before closing the window.
+        Probability of `word`.
+        :param word:
+        :return: float
         """
-        if self.user_thread and self.user_thread.is_alive():
-            self.bot_thread._tstate_lock.release_lock()
-            self.user_thread._stop()
-        if self.bot_thread and self.bot_thread.is_alive():
-            self.bot_thread._tstate_lock.release_lock()
-            self.bot_thread._stop()
-        self.root.destroy()
+        return self.WORDS[word] / self.total_word_count
 
-    def show_bubble(self, message="", bot=True):
+    def candidates(self, word):
         """
-        message: (str) Bubble message shown in canvas
-        bot: (bool) Shown the bubble based on this value
-
-        Add the bubble to canvas.
-
-        Previous canvas are moved based on the last bubble height and new bubbles are added.
-        Color, arrow(draw_triangle), image(add_icon) and Position of the Bubble is configures here
-
-        UserBubble is added to right side of the canvas.
-        BotBubble is added to left side of the canvas.
+        Generate possible spelling corrections for word.
+        :param word: str
+        :return: set of known words
         """
-        if self.last_bubble:
-            self.canvas.move(ALL, 0, -(self.last_bubble.winfo_height() + 10))
-        bg_color = "light blue" if bot else "light grey"
-        color = "black"  # if bot else "white"
-        frame = Frame(self.canvas, bg=bg_color)
-        self.last_bubble = frame
+        return (self.known([word]) or self.known(self.edits1(word)) or
+                self.known(self.edits2(word)) or [word])
 
-        widget = self.canvas.create_window(50 if bot else 700, 440, window=frame, anchor='nw' if bot else 'ne')
-
-        chat_label = Label(frame, text=message, wraplength=600, justify=LEFT if bot else RIGHT, font=("Helvetica", 12),
-                           bg=bg_color, fg=color)
-        chat_label.pack(anchor="w" if bot else 'e', side=LEFT if bot else RIGHT, pady=10, padx=10)
-
-        self.root.update_idletasks()
-
-        self.canvas.create_polygon(self.draw_triangle(widget, bot), fill=bg_color, outline=bg_color)
-        self.add_icon(widget, bot)
-
-    def add_icon(self, widget, bot=True):
+    def known(self, words):
         """
-        Add the image to given widget.
-        Currently this based bot and user bubble positions.
+        The subset of `words` that appear in the dictionary of WORDS.
+        :param words: list of str
+        :return: unique set of words
+        """
+        return {w for w in words if w in self.WORDS}
 
-        If it's moved we need to update the x1 and y1 values.
+    @staticmethod
+    def edits1(word):
         """
-        x1, y1, x2, y2 = self.canvas.bbox(widget)
-        if bot:
-            self.canvas.create_image(x1 - 72, y2, image=self.bot_image, anchor=W)
-        else:
-            self.canvas.create_image(x2 + 72, y2, image=self.user_image, anchor=E)
+        All edits that are one edit away from `word`.
+        :param word: String
+        :return: set of words
+        """
+        letters = 'abcdefghijklmnopqrstuvwxyz'
+        splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
+        deletes = [L + R[1:] for L, R in splits if R]
+        transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
+        replaces = [L + c + R[1:] for L, R in splits if R for c in letters]
+        inserts = [L + c + R for L, R in splits for c in letters]
+        return set(deletes + transposes + replaces + inserts)
 
-    def draw_triangle(self, widget, bot=True):
+    def edits2(self, word):
         """
-        Draw the triangles in the bubble widget.
+        All edits that are two edits away from `word`.
+        :param word: string
+        :return: string generator
         """
-        x1, y1, x2, y2 = self.canvas.bbox(widget)
-        if bot:
-            return x1, y2 - 10, x1 - 10, y2, x1, y2
-        return 700, y2 - 10, 700, y2, 710, y2
-
-    def add_user_message(self, message):
-        """
-        create a user bubble and disable the input box until bot bubble is shown.
-        Moreover, update the scroll location of the canvas
-        """
-        self.user_input_box.config(state=DISABLED)
-        self.send_button.config(state=DISABLED)
-        self.show_bubble(message, bot=False)
-        # need to update canvas scroll region after content modified
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self.thread_event.set()
-
-    def add_bot_message(self, message):
-        """
-        create a bot bubble and enable the input box after message shown in the canvas.
-        Moreover, update the scroll location of the canvas
-        """
-        self.show_bubble(message, bot=True)
-        self.user_input_box.config(state=NORMAL)
-        self.send_button.config(state=NORMAL)
-        # need to update canvas scroll region after content modified
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def process_message(self, message):
-        """
-        Call the bot handler and add the result to bot_message
-        """
-        bot_message = self.callback(message)
-        while not self.thread_event.is_set():
-            sleep(0.1)
-        self.add_bot_message(bot_message)
-
-    def user_input_handler(self, event):
-        """
-        User InputBox widget
-        """
-        message = self.user_input_box.get()
-
-        if not message:
-            return
-
-        if message == self.terminate:
-            self.close_handler()
-            return
-
-        self.thread_event.clear()
-        self.user_thread = Thread(target=self.add_user_message, args=(message,))
-        self.bot_thread = Thread(target=self.process_message, args=(message,))
-        self.user_thread.start()
-        self.bot_thread.start()
-
-        self.user_input_box.delete(0, END)
-
-    def user_input_box_handler(self, event):
-        """
-        Helper method to add the newline in the InputBox
-        """
-        self.user_input_box.insert(END, "\n")
+        return (e2 for e1 in self.edits1(word) for e2 in self.edits1(e1))
